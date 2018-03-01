@@ -4,12 +4,18 @@ import (
 	"net"
 )
 
+// TCPServer represents a TCP server.
+type TCPServer interface {
+	Server
+	NextConnection() *net.TCPConn
+}
+
 type tcpServer struct {
-	connCh  chan net.Conn
+	connCh  chan *net.TCPConn
 	errorCh chan error
 }
 
-func (s *tcpServer) NextConnection() net.Conn {
+func (s *tcpServer) NextConnection() *net.TCPConn {
 	return <-s.connCh
 }
 
@@ -17,13 +23,8 @@ func (s *tcpServer) NextError() error {
 	return <-s.errorCh
 }
 
-// TCPServerParams represents the required parameters to set up a TCP server.
-type TCPServerParams struct {
-	TCPParams
-	Capacity uint
-}
-
-func newTCPServer(params TCPServerParams) (Server, error) {
+// NewTCPServer returns a new TCP server.
+func NewTCPServer(params TCPServerParams) (TCPServer, error) {
 	protocol := string(params.Protocol)
 
 	addr, err := net.ResolveTCPAddr(protocol, params.Address)
@@ -39,7 +40,7 @@ func newTCPServer(params TCPServerParams) (Server, error) {
 	}
 
 	server := tcpServer{
-		connCh:  make(chan net.Conn, params.Capacity),
+		connCh:  make(chan *net.TCPConn, params.Capacity),
 		errorCh: make(chan error),
 	}
 

@@ -2,15 +2,21 @@ package goip
 
 import "net"
 
-type tcpClient struct {
-	conn net.Conn
+// TCPClient represents a TCP client.
+type TCPClient interface {
+	Connection() *net.TCPConn
 }
 
-func (tc *tcpClient) Connection() net.Conn {
+type tcpClient struct {
+	conn *net.TCPConn
+}
+
+func (tc *tcpClient) Connection() *net.TCPConn {
 	return tc.conn
 }
 
-func newTCPClient(params TCPParams) (Client, error) {
+// NewTCPClient returns a new TCP client.
+func NewTCPClient(params TCPCommonParams) (TCPClient, error) {
 	protocol := string(params.Protocol)
 	tcpAddr, err := net.ResolveTCPAddr(protocol, params.Address)
 
