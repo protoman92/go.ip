@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"goip"
 	"net"
@@ -20,7 +21,7 @@ var (
 	// studying the effects of go run -race.
 	msgCount     = 0
 	minParams    = goip.CommonParams{Address: "localhost:1201"}
-	serverParams = goip.ServerCommonParams{Capacity: 1000}
+	serverParams = goip.ServerCommonParams{Capacity: 0}
 	tcpParams    = goip.TCPCommonParams{CommonParams: minParams, Protocol: goip.TCP4}
 
 	tcpServerParams = goip.TCPServerParams{
@@ -40,12 +41,28 @@ var (
 	}
 )
 
+type message struct {
+	Client int `json:"Client"`
+	Count  int
+	Msg    string `json:"Msg"`
+}
+
+func newMessage(client int, msg string) message {
+	// Obvious race condition here but do not worry.
+	msgCount++
+	return message{Client: client, Count: msgCount, Msg: msg}
+}
+
+func (m *message) String() string {
+	return fmt.Sprintf("Client: %d, message %d: %s", m.Client, m.Count, m.Msg)
+}
+
 func main() {
 	if tcp {
 		setupTCPServer()
 
 		for i := 0; i < clientCount; i++ {
-			setupTCPClient()
+			setupTCPClient(i)
 		}
 	}
 
@@ -53,7 +70,7 @@ func main() {
 		setupUDPServer()
 
 		for i := 0; i < clientCount; i++ {
-			setupUDPClient()
+			setupUDPClient(i)
 		}
 	}
 
@@ -67,6 +84,33 @@ func setupTCPServer() {
 
 	if tErr != nil {
 		panic(tErr)
+	}
+
+	handleTCPConnection := func(conn *net.TCPConn) {
+		defer conn.Close()
+		var buf [512]byte
+
+		for {
+			var read int
+
+			if n, err := conn.Read(buf[0:]); err != nil {
+				panic(err)
+			} else {
+				read = n
+			}
+
+			var outMsg []byte
+
+			if msg, err := unmarshallAndMarshallJSON(buf[0:read]); err != nil {
+				panic(err)
+			} else {
+				outMsg = msg
+			}
+
+			if _, err := conn.Write(outMsg); err != nil {
+				panic(err)
+			}
+		}
 	}
 
 	go func() {
@@ -84,25 +128,6 @@ func setupTCPServer() {
 	}()
 }
 
-func handleTCPConnection(conn *net.TCPConn) {
-	defer conn.Close()
-	var buf [512]byte
-
-	for {
-		n, err := conn.Read(buf[0:])
-
-		if err != nil {
-			return
-		}
-
-		_, err2 := conn.Write(buf[0:n])
-
-		if err2 != nil {
-			return
-		}
-	}
-}
-
 func setupUDPServer() {
 	server, uErr := goip.NewUDPServer(udpServerParams)
 
@@ -110,12 +135,27 @@ func setupUDPServer() {
 		panic(uErr)
 	}
 
+	handleMessage := func(msg *goip.UDPMessage) (*goip.UDPMessage, error) {
+		newMsg, err := unmarshallAndMarshallJSON(msg.Msg)
+
+		if err != nil {
+			return nil, err
+		}
+
+		return &goip.UDPMessage{Address: msg.Address, Msg: newMsg}, nil
+	}
+
 	conn := server.Connection()
 
 	go func() {
 		for {
 			msg := server.NextMessage()
-			conn.WriteToUDP(msg.Msg, msg.Address)
+
+			if newMsg, err := handleMessage(msg); err != nil {
+				panic(err)
+			} else {
+				conn.WriteToUDP(newMsg.Msg, newMsg.Address)
+			}
 		}
 	}()
 
@@ -127,52 +167,78 @@ func setupUDPServer() {
 	}()
 }
 
+func unmarshallAndMarshallJSON(msg []byte) ([]byte, error) {
+	unmarshalled := new(message)
+
+	if err := json.Unmarshal(msg, unmarshalled); err != nil {
+		return nil, err
+	}
+
+	json, err := json.Marshal(unmarshalled)
+	return []byte(json), err
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
-func setupTCPClient() {
-	client, tErr := goip.NewTCPClient(tcpParams)
-
-	if tErr != nil {
-		panic(tErr)
+func setupTCPClient(i int) {
+	if client, err := goip.NewTCPClient(tcpParams); err != nil {
+		panic(err)
+	} else {
+		handleClientConnection(client.Connection(), i)
 	}
-
-	handleClientConnection(client.Connection())
 }
 
-func setupUDPClient() {
-	client, uErr := goip.NewUDPClient(udpParams)
-
-	if uErr != nil {
-		panic(uErr)
+func setupUDPClient(i int) {
+	if client, err := goip.NewUDPClient(udpParams); err != nil {
+		panic(err)
+	} else {
+		handleClientConnection(client.Connection(), i)
 	}
-
-	handleClientConnection(client.Connection())
 }
 
-func handleClientConnection(conn net.Conn) {
+func handleClientConnection(conn net.Conn, i int) {
 	writer := bufio.NewWriter(os.Stdout)
 
 	go func() {
+		times := 0
+
 		for {
-			conn.Write([]byte("Hello world!"))
-			reader := bufio.NewReader(conn)
+			times++
+			msg := newMessage(i, "Hello world!")
+			var marshalled []byte
 
-			if line, err1 := reader.ReadString('!'); err1 == nil {
-				outLine := line + "\n"
-
-				if _, err2 := writer.Write([]byte(outLine)); err2 != nil {
-					panic(err2)
-				}
-
-				if err3 := writer.Flush(); err3 != nil {
-					panic(err3)
-				}
+			if marshalledMsg, err := json.Marshal(msg); err != nil {
+				panic(err)
 			} else {
-				panic(err1)
+				marshalled = marshalledMsg
 			}
 
-			// Obvious race condition here but do not worry.
-			msgCount++
+			conn.Write(marshalled)
+			reader := bufio.NewReader(conn)
+			var nextLine []byte
+
+			if line, err := reader.ReadBytes('}'); err != nil {
+				panic(err)
+			} else {
+				nextLine = line
+			}
+
+			unmarshalled := new(message)
+
+			if err := json.Unmarshal(nextLine, unmarshalled); err != nil {
+				panic(err)
+			}
+
+			output := fmt.Sprintln(unmarshalled)
+
+			if _, err := writer.Write([]byte(output)); err != nil {
+				panic(err)
+			}
+
+			if err := writer.Flush(); err != nil {
+				panic(err)
+			}
+
 			time.Sleep(1e9)
 		}
 	}()
